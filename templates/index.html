@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BSC靓号生成器 - Web管理端</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <header class="header">
+            <h1>🚀 BSC靓号生成器</h1>
+            <p>Web管理端 - 轻松管理多台服务器生成靓号地址</p>
+        </header>
+
+        <!-- 主内容区 -->
+        <div class="main-content">
+            <!-- 左侧配置面板 -->
+            <div class="config-panel">
+                <div class="card">
+                    <h2>🔌 服务器连接</h2>
+                    
+                    <div class="form-group">
+                        <label>服务器IP:</label>
+                        <input type="text" id="host" placeholder="例如: 192.168.1.100" value="">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>端口:</label>
+                        <input type="number" id="port" placeholder="默认: 22" value="22">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>用户名:</label>
+                        <input type="text" id="username" placeholder="默认: root" value="root">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>密码:</label>
+                        <input type="password" id="password" placeholder="SSH密码">
+                    </div>
+                    
+                    <button class="btn btn-primary" onclick="testConnection()">
+                        🔍 测试连接
+                    </button>
+                    
+                    <!-- 服务器信息显示 -->
+                    <div id="server-info" class="server-info" style="display: none;">
+                        <h3>✅ 服务器信息</h3>
+                        <div class="info-item">
+                            <span class="label">CPU核心:</span>
+                            <span id="cpu-cores" class="value">-</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">内存:</span>
+                            <span id="memory" class="value">-</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Python版本:</span>
+                            <span id="python-version" class="value">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>⚙️ 生成配置</h2>
+                    
+                    <div class="form-group">
+                        <label>前缀 (Prefix):</label>
+                        <input type="text" id="prefix" placeholder="例如: 1780" maxlength="10">
+                        <small>地址开头的字符（不含0x）</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>后缀 (Suffix):</label>
+                        <input type="text" id="suffix" placeholder="例如: 3CffbD" maxlength="10">
+                        <small>地址结尾的字符</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>包含 (Contains):</label>
+                        <input type="text" id="contains" placeholder="例如: 888" maxlength="10">
+                        <small>地址中包含的字符</small>
+                    </div>
+                    
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="case-sensitive">
+                            区分大小写
+                        </label>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>生成数量:</label>
+                        <input type="number" id="wallet-count" value="1" min="1" max="100">
+                        <small>需要生成几个地址</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>CPU核心数: <span id="cpu-value">4</span></label>
+                        <input type="range" id="cpu-slider" min="1" max="64" value="4" 
+                               oninput="updateCPUValue(this.value)" disabled>
+                        <small>连接服务器后自动检测并设置</small>
+                    </div>
+                    
+                    <button class="btn btn-success" onclick="startGeneration()" id="start-btn" disabled>
+                        🚀 开始生成
+                    </button>
+                </div>
+            </div>
+
+            <!-- 右侧输出面板 -->
+            <div class="output-panel">
+                <div class="card">
+                    <h2>📊 实时输出</h2>
+                    
+                    <div class="status-bar">
+                        <span id="status-text">状态: 等待连接...</span>
+                        <span id="task-id" style="display: none;"></span>
+                        <button class="btn btn-danger btn-stop-inline" onclick="stopTask()" id="stop-btn" style="display: none; float: right; padding: 5px 15px; font-size: 0.9em;">
+                            ⏹️ 停止任务
+                        </button>
+                    </div>
+                    
+                    <div class="terminal" id="terminal">
+                        <div class="terminal-line welcome">
+                            欢迎使用 BSC靓号生成器 Web管理端！<br>
+                            请先配置左侧的服务器连接信息并测试连接。<br>
+                            <br>
+                            💡 使用说明:<br>
+                            1. 填写服务器IP、用户名和密码<br>
+                            2. 点击"测试连接"验证服务器<br>
+                            3. 设置生成参数（前缀、后缀、包含）<br>
+                            4. 调整CPU核心数（拖拽滑块）<br>
+                            5. 点击"开始生成"启动任务<br>
+                            <br>
+                            ⚠️ 至少需要设置一个条件（前缀/后缀/包含）<br>
+                        </div>
+                    </div>
+                    
+                    <div class="terminal-controls">
+                        <button class="btn btn-small" onclick="clearTerminal()">清空日志</button>
+                        <button class="btn btn-small" onclick="scrollToBottom()">滚动到底部</button>
+                    </div>
+                </div>
+                
+                <!-- 结果下载区域 -->
+                <div class="card" id="download-section" style="display: none;">
+                    <h2>📥 下载结果</h2>
+                    <div class="download-info">
+                        <p>✅ 生成完成！点击下载按钮保存钱包文件。</p>
+                        <button class="btn btn-primary" onclick="downloadResult()" id="download-btn">
+                            💾 下载钱包文件
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 页脚 -->
+        <footer class="footer">
+            <p>© 2025 BSC靓号生成器 | 基于 <a href="https://github.com/six8888-cpu/bsclianghao" target="_blank">开源项目</a></p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
+
