@@ -224,18 +224,14 @@ if [ "$ssl_choice" = "1" ]; then
     systemctl start nginx
     print_success "Nginx安装完成"
     
-    # 安装Certbot
-    print_info "安装Certbot..."
-    if [ "$OS" = "debian" ]; then
-        apt install -y certbot python3-certbot-nginx
-    else
-        # CentOS需要EPEL源
-        if [ ! -f /etc/yum.repos.d/epel.repo ]; then
-            $PKG_MANAGER install -y epel-release
-        fi
-        $PKG_MANAGER install -y certbot python3-certbot-nginx
+    # 安装acme.sh（替代Certbot，兼容性更好）
+    print_info "安装acme.sh证书工具..."
+    if [ ! -d ~/.acme.sh ]; then
+        curl https://get.acme.sh | sh
+        export LE_WORKING_DIR="$HOME/.acme.sh"
+        source ~/.bashrc 2>/dev/null || true
     fi
-    print_success "Certbot安装完成"
+    print_success "acme.sh安装完成"
     
     # 配置Nginx
     print_info "配置Nginx..."
@@ -258,29 +254,87 @@ server {
 }
 EOF
     
-    # 测试Nginx配置
-    if nginx -t; then
-        print_success "Nginx配置测试通过"
-        systemctl reload nginx
-    else
-        print_error "Nginx配置有误"
-        exit 1
-    fi
+    # 停止Nginx（acme.sh需要80端口）
+    systemctl stop nginx
     
-    # 申请SSL证书
-    print_info "申请SSL证书..."
-    if certbot --nginx -d "$DOMAIN" --email "$EMAIL" --agree-tos --non-interactive --redirect; then
+    # 申请SSL证书（使用acme.sh）
+    print_info "申请SSL证书（Let's Encrypt）..."
+    
+    # 注册账号
+    ~/.acme.sh/acme.sh --register-account -m "$EMAIL" 2>/dev/null || true
+    
+    # 申请证书
+    if ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone; then
         print_success "SSL证书申请成功！"
-        print_success "域名配置完成: https://$DOMAIN"
-        ACCESS_URL="https://$DOMAIN"
         
-        # 设置自动续期
-        print_info "配置证书自动续期..."
-        (crontab -l 2>/dev/null || echo ""; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
-        print_success "证书将在每天凌晨3点自动检查续期"
+        # 创建证书目录
+        mkdir -p /etc/ssl/bsc-web
+        
+        # 安装证书
+        ~/.acme.sh/acme.sh --installcert -d "$DOMAIN" \
+            --key-file /etc/ssl/bsc-web/${DOMAIN}.key \
+            --fullchain-file /etc/ssl/bsc-web/${DOMAIN}.crt \
+            --reloadcmd "systemctl reload nginx"
+        
+        # 更新Nginx配置为HTTPS
+        cat > /etc/nginx/conf.d/bsc-web.conf << EOF
+# HTTP重定向到HTTPS
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\\\$server_name\\\$request_uri;
+}
+
+# HTTPS配置
+server {
+    listen 443 ssl http2;
+    server_name $DOMAIN;
+    
+    # SSL证书
+    ssl_certificate /etc/ssl/bsc-web/${DOMAIN}.crt;
+    ssl_certificate_key /etc/ssl/bsc-web/${DOMAIN}.key;
+    
+    # SSL优化
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    
+    # 反向代理
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
+        proxy_read_timeout 86400;
+    }
+}
+EOF
+        
+        # 测试并启动Nginx
+        if nginx -t; then
+            systemctl start nginx
+            print_success "Nginx配置成功"
+            print_success "域名配置完成: https://$DOMAIN"
+            ACCESS_URL="https://$DOMAIN"
+        else
+            print_error "Nginx配置测试失败"
+            exit 1
+        fi
+        
+        # acme.sh会自动配置续期
+        print_success "证书自动续期已配置（acme.sh cron任务）"
+        
     else
         print_error "SSL证书申请失败"
+        print_warning "请检查：1) 域名是否正确解析 2) 80端口是否开放"
         print_warning "您仍然可以通过 http://$DOMAIN 访问"
+        
+        # 启动Nginx（HTTP模式）
+        systemctl start nginx
         ACCESS_URL="http://$DOMAIN"
     fi
     

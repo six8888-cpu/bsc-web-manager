@@ -1,6 +1,8 @@
 #!/bin/bash
+###############################################################################
 # BSC靓号生成器 - SSL证书自动申请和配置脚本
-# 支持 Let's Encrypt 免费证书
+# 使用acme.sh替代Certbot，兼容性更好，支持CentOS/Ubuntu
+###############################################################################
 
 set -e
 
@@ -9,24 +11,12 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 打印带颜色的消息
-print_info() {
-    echo -e "${BLUE}ℹ️  $1${NC}"
-}
-
-print_success() {
-    echo -e "${GREEN}✅ $1${NC}"
-}
-
-print_warning() {
-    echo -e "${YELLOW}⚠️  $1${NC}"
-}
-
-print_error() {
-    echo -e "${RED}❌ $1${NC}"
-}
+print_info() { echo -e "${BLUE}ℹ️  $1${NC}"; }
+print_success() { echo -e "${GREEN}✅ $1${NC}"; }
+print_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
+print_error() { echo -e "${RED}❌ $1${NC}"; }
 
 # 检查root权限
 if [ "$EUID" -ne 0 ]; then 
@@ -35,9 +25,10 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo "========================================"
+clear
+echo "=========================================="
 echo "🔐 BSC靓号生成器 - SSL证书配置工具"
-echo "========================================"
+echo "=========================================="
 echo ""
 
 # 检测系统类型
@@ -60,43 +51,42 @@ print_info "检测到系统: $OS (使用 $PKG_MANAGER)"
 echo ""
 
 # 交互式输入域名
-echo "请输入要绑定的域名："
-read -p "域名 (例如: example.com): " DOMAIN
+read -p "请输入域名 (如: web.yourdomain.com): " DOMAIN
 
 if [ -z "$DOMAIN" ]; then
     print_error "域名不能为空"
     exit 1
 fi
 
-# 验证域名格式
-if [[ ! $DOMAIN =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$ ]]; then
-    print_warning "域名格式可能不正确，但继续执行..."
+# 输入邮箱
+read -p "请输入邮箱 (用于SSL证书通知): " EMAIL
+
+if [ -z "$EMAIL" ]; then
+    print_error "邮箱不能为空"
+    exit 1
 fi
 
 echo ""
 print_info "域名: $DOMAIN"
+print_info "邮箱: $EMAIL"
 echo ""
 
 # 检查域名DNS解析
 print_info "检查域名DNS解析..."
-DOMAIN_IP=$(dig +short $DOMAIN | tail -n1)
-SERVER_IP=$(curl -s ifconfig.me || curl -s ip.sb || hostname -I | awk '{print $1}')
+DOMAIN_IP=$(dig +short $DOMAIN 2>/dev/null | tail -n1)
+SERVER_IP=$(curl -s ip.sb || curl -s ifconfig.me)
 
 if [ -z "$DOMAIN_IP" ]; then
-    print_warning "无法解析域名 $DOMAIN，请确保DNS已正确配置"
-    read -p "是否继续? (y/n): " CONTINUE
-    if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
-        exit 1
-    fi
+    print_warning "无法解析域名 $DOMAIN"
 else
     print_info "域名解析到: $DOMAIN_IP"
     print_info "服务器IP: $SERVER_IP"
     
     if [ "$DOMAIN_IP" != "$SERVER_IP" ]; then
-        print_warning "域名解析IP ($DOMAIN_IP) 与服务器IP ($SERVER_IP) 不一致"
-        print_warning "请确保域名已正确解析到此服务器"
-        read -p "是否继续? (y/n): " CONTINUE
-        if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
+        print_warning "域名解析IP与服务器IP不一致"
+        read -p "是否继续? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             exit 1
         fi
     else
@@ -106,10 +96,9 @@ fi
 
 echo ""
 
-# 检查并安装Nginx
-print_info "检查Nginx..."
+# 安装Nginx
+print_info "安装Nginx..."
 if ! command -v nginx &> /dev/null; then
-    print_warning "Nginx未安装，开始安装..."
     if [ "$PKG_MANAGER" = "apt" ]; then
         apt update -qq
         apt install -y nginx
@@ -122,64 +111,172 @@ else
     print_success "Nginx已安装"
 fi
 
-# 检查并安装certbot
-print_info "检查Certbot..."
-if ! command -v certbot &> /dev/null; then
-    print_warning "Certbot未安装，开始安装..."
-    if [ "$PKG_MANAGER" = "apt" ]; then
-        apt update -qq
-        apt install -y certbot python3-certbot-nginx
-    elif [ "$PKG_MANAGER" = "yum" ]; then
-        yum install -y epel-release
-        yum install -y certbot python3-certbot-nginx
-    else
-        dnf install -y certbot python3-certbot-nginx
-    fi
-    print_success "Certbot安装完成"
+# 安装acme.sh（替代Certbot）
+print_info "安装acme.sh证书工具..."
+if [ ! -d ~/.acme.sh ]; then
+    curl https://get.acme.sh | sh
+    export LE_WORKING_DIR="$HOME/.acme.sh"
+    source ~/.bashrc 2>/dev/null || true
+    print_success "acme.sh安装完成"
 else
-    print_success "Certbot已安装"
+    print_success "acme.sh已安装"
 fi
 
 echo ""
 
-# 检查Web服务端口
-print_info "检查Web服务配置..."
+# 检查Web服务
 WEB_PORT=5000
-if systemctl is-active --quiet bsc-web 2>/dev/null; then
-    print_success "BSC Web服务正在运行 (端口 $WEB_PORT)"
+if systemctl is-active --quiet bsc-web-manager 2>/dev/null; then
+    print_success "BSC Web服务正在运行"
+elif systemctl is-active --quiet bsc-web 2>/dev/null; then
+    print_success "BSC Web服务正在运行"
 else
-    print_warning "BSC Web服务未运行，请确保服务已启动"
-    read -p "是否继续配置SSL? (y/n): " CONTINUE
-    if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
-        exit 1
-    fi
+    print_warning "BSC Web服务未运行，但继续配置SSL"
 fi
 
-echo ""
+# 停止Nginx（acme.sh standalone需要80端口）
+print_info "准备申请证书..."
+systemctl stop nginx 2>/dev/null || true
 
-# 配置Nginx反向代理
-print_info "配置Nginx反向代理..."
+# 注册acme.sh账号
+~/.acme.sh/acme.sh --register-account -m "$EMAIL" 2>/dev/null || true
 
-NGINX_CONF="/etc/nginx/sites-available/bsc-web"
-if [ "$OS" = "redhat" ]; then
-    NGINX_CONF="/etc/nginx/conf.d/bsc-web.conf"
-fi
-
-# 创建Nginx配置
-cat > $NGINX_CONF << EOF
+# 申请SSL证书
+print_info "申请SSL证书（Let's Encrypt）..."
+if ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone; then
+    print_success "SSL证书申请成功！"
+    
+    # 创建证书目录
+    mkdir -p /etc/ssl/bsc-web
+    
+    # 安装证书
+    ~/.acme.sh/acme.sh --installcert -d "$DOMAIN" \
+        --key-file /etc/ssl/bsc-web/${DOMAIN}.key \
+        --fullchain-file /etc/ssl/bsc-web/${DOMAIN}.crt \
+        --reloadcmd "systemctl reload nginx"
+    
+    print_success "证书安装完成"
+    
+    # 配置Nginx
+    print_info "配置Nginx..."
+    cat > /etc/nginx/conf.d/bsc-web.conf << EOF
+# HTTP重定向到HTTPS
 server {
     listen 80;
     server_name $DOMAIN;
+    return 301 https://\$server_name\$request_uri;
+}
 
-    # 用于Let's Encrypt验证
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-
-    # 重定向到HTTPS（证书申请后启用）
-    # return 301 https://\$server_name\$request_uri;
+# HTTPS配置
+server {
+    listen 443 ssl http2;
+    server_name $DOMAIN;
     
-    # 临时：代理到Web服务（申请证书时使用）
+    # SSL证书
+    ssl_certificate /etc/ssl/bsc-web/${DOMAIN}.crt;
+    ssl_certificate_key /etc/ssl/bsc-web/${DOMAIN}.key;
+    
+    # SSL优化
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    
+    # 反向代理到BSC Web端
+    location / {
+        proxy_pass http://127.0.0.1:$WEB_PORT;
+        proxy_http_version 1.1;
+        
+        # WebSocket支持
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # 传递真实客户端信息
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # 超时设置
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 86400s;
+    }
+}
+EOF
+    
+    # 测试Nginx配置
+    if nginx -t 2>/dev/null; then
+        print_success "Nginx配置测试通过"
+    else
+        print_error "Nginx配置测试失败"
+        cat /etc/nginx/conf.d/bsc-web.conf
+        exit 1
+    fi
+    
+    # 启动Nginx
+    systemctl start nginx
+    systemctl reload nginx 2>/dev/null || true
+    print_success "Nginx启动成功"
+    
+    # 配置防火墙
+    print_info "配置防火墙..."
+    if command -v ufw &> /dev/null; then
+        ufw allow 80/tcp 2>/dev/null || true
+        ufw allow 443/tcp 2>/dev/null || true
+        print_success "防火墙配置完成 (ufw)"
+    elif command -v firewall-cmd &> /dev/null; then
+        firewall-cmd --permanent --add-port=80/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=443/tcp 2>/dev/null || true
+        firewall-cmd --reload 2>/dev/null || true
+        print_success "防火墙配置完成 (firewalld)"
+    else
+        print_warning "未检测到防火墙，请在云服务商控制台开放80和443端口"
+    fi
+    
+    echo ""
+    echo "=========================================="
+    print_success "🎉 SSL配置完成！"
+    echo "=========================================="
+    echo ""
+    echo "📱 访问地址："
+    echo "   https://$DOMAIN"
+    echo ""
+    echo "🔐 证书信息："
+    echo "   域名: $DOMAIN"
+    echo "   证书: /etc/ssl/bsc-web/${DOMAIN}.crt"
+    echo "   密钥: /etc/ssl/bsc-web/${DOMAIN}.key"
+    echo "   有效期: 90天（自动续期）"
+    echo ""
+    echo "📋 证书管理命令："
+    echo "   ~/.acme.sh/acme.sh --list                    # 查看证书列表"
+    echo "   ~/.acme.sh/acme.sh --info -d $DOMAIN          # 查看证书详情"
+    echo "   ~/.acme.sh/acme.sh --renew -d $DOMAIN --force # 强制续期"
+    echo ""
+    echo "🛠️  Nginx管理命令："
+    echo "   systemctl status nginx       # 查看状态"
+    echo "   systemctl restart nginx      # 重启Nginx"
+    echo "   nginx -t                     # 测试配置"
+    echo ""
+    print_success "证书自动续期已配置（acme.sh cron任务）"
+    echo ""
+    
+else
+    print_error "SSL证书申请失败"
+    print_warning "常见原因："
+    echo "  1. 域名未正确解析到服务器IP"
+    echo "  2. 防火墙未开放80端口"
+    echo "  3. 80端口被其他服务占用"
+    echo ""
+    print_info "您仍然可以通过 http://$DOMAIN 或 http://$SERVER_IP:5000 访问"
+    
+    # 配置HTTP模式的Nginx
+    cat > /etc/nginx/conf.d/bsc-web.conf << EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    
     location / {
         proxy_pass http://127.0.0.1:$WEB_PORT;
         proxy_http_version 1.1;
@@ -189,147 +286,13 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 86400;
     }
 }
 EOF
-
-# 如果是Debian/Ubuntu，创建符号链接
-if [ "$OS" = "debian" ]; then
-    if [ ! -L "/etc/nginx/sites-enabled/bsc-web" ]; then
-        ln -s $NGINX_CONF /etc/nginx/sites-enabled/bsc-web
-    fi
-    # 删除默认配置（如果存在）
-    rm -f /etc/nginx/sites-enabled/default
-fi
-
-# 测试Nginx配置
-print_info "测试Nginx配置..."
-nginx -t
-if [ $? -eq 0 ]; then
-    print_success "Nginx配置正确"
-else
-    print_error "Nginx配置有误，请检查"
-    exit 1
-fi
-
-# 启动Nginx
-systemctl restart nginx
-systemctl enable nginx
-
-print_success "Nginx配置完成"
-echo ""
-
-# 申请SSL证书
-print_info "开始申请SSL证书..."
-echo ""
-
-# 输入邮箱（可选）
-read -p "请输入邮箱地址（用于证书到期提醒，可选）: " EMAIL
-if [ -z "$EMAIL" ]; then
-    EMAIL="admin@$DOMAIN"
-fi
-
-# 申请证书
-print_info "正在申请Let's Encrypt证书..."
-print_warning "这可能需要几分钟时间，请耐心等待..."
-echo ""
-
-if certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect; then
-    print_success "SSL证书申请成功！"
-else
-    print_error "SSL证书申请失败"
-    echo ""
-    print_info "可能的原因："
-    echo "  1. 域名DNS未正确解析到此服务器"
-    echo "  2. 80端口被占用或防火墙未开放"
-    echo "  3. 域名已申请过证书（需要先删除）"
-    echo ""
-    read -p "是否查看详细错误信息? (y/n): " SHOW_ERROR
-    if [ "$SHOW_ERROR" = "y" ] || [ "$SHOW_ERROR" = "Y" ]; then
-        certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL
-    fi
-    exit 1
+    
+    systemctl start nginx
+    print_info "已配置HTTP模式: http://$DOMAIN"
 fi
 
 echo ""
-
-# 更新Nginx配置以支持WebSocket
-print_info "更新Nginx配置以支持WebSocket..."
-cat >> $NGINX_CONF << 'WEBSOCKET'
-
-    # WebSocket支持
-    location /socket.io {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-WEBSOCKET
-
-# 重新加载Nginx
-nginx -t && systemctl reload nginx
-print_success "Nginx配置已更新"
-
-echo ""
-
-# 设置自动续签
-print_info "配置自动续签..."
-# Certbot会自动创建续签任务，但我们可以验证一下
-if [ -f "/etc/cron.d/certbot" ] || systemctl list-timers | grep -q certbot; then
-    print_success "自动续签已配置"
-else
-    # 手动创建续签任务
-    (crontab -l 2>/dev/null; echo "0 0,12 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
-    print_success "已添加自动续签任务"
-fi
-
-# 测试续签
-print_info "测试证书续签..."
-certbot renew --dry-run
-if [ $? -eq 0 ]; then
-    print_success "自动续签测试通过"
-else
-    print_warning "自动续签测试失败，但证书已成功申请"
-fi
-
-echo ""
-
-# 配置防火墙
-print_info "配置防火墙..."
-if command -v ufw &> /dev/null; then
-    ufw allow 80/tcp
-    ufw allow 443/tcp
-    print_success "UFW防火墙已配置"
-elif command -v firewall-cmd &> /dev/null; then
-    firewall-cmd --add-service=http --permanent
-    firewall-cmd --add-service=https --permanent
-    firewall-cmd --reload
-    print_success "Firewalld防火墙已配置"
-fi
-
-echo ""
-echo "========================================"
-print_success "SSL证书配置完成！"
-echo "========================================"
-echo ""
-echo "📋 配置信息:"
-echo "   域名: $DOMAIN"
-echo "   SSL证书: Let's Encrypt"
-echo "   证书位置: /etc/letsencrypt/live/$DOMAIN/"
-echo "   自动续签: 已启用"
-echo ""
-echo "🌐 访问地址:"
-echo "   https://$DOMAIN"
-echo ""
-echo "📝 证书管理命令:"
-echo "   查看证书: certbot certificates"
-echo "   手动续签: certbot renew"
-echo "   删除证书: certbot delete --cert-name $DOMAIN"
-echo ""
-print_info "证书将在到期前自动续签，无需手动操作"
-echo ""
-
