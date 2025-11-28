@@ -98,6 +98,16 @@ fi
 
 echo ""
 
+# 安装必要工具
+print_info "安装必要工具..."
+if ! command -v netstat &> /dev/null; then
+    if [ "$OS" = "debian" ]; then
+        apt install -y net-tools
+    else
+        $PKG_MANAGER install -y net-tools
+    fi
+fi
+
 # 安装Nginx
 print_info "安装Nginx..."
 if ! command -v nginx &> /dev/null; then
@@ -139,16 +149,35 @@ fi
 
 echo ""
 
-# 停止Nginx（申请证书需要80端口）
+# 停止可能占用80端口的服务
 print_info "准备申请证书..."
 systemctl stop nginx 2>/dev/null || true
+systemctl stop trojan 2>/dev/null || true
+systemctl stop trojan-web 2>/dev/null || true
+
+# 检查80端口是否被占用
+if netstat -tulpn | grep -q ":80 "; then
+    print_warning "80端口仍被占用，使用88端口申请证书"
+    USE_PORT=88
+    firewall-cmd --add-port=88/tcp 2>/dev/null || true
+else
+    USE_PORT=80
+fi
 
 # 注册acme.sh账号
 ~/.acme.sh/acme.sh --register-account -m "$EMAIL" 2>/dev/null || true
 
 # 申请SSL证书
 print_info "申请SSL证书（Let's Encrypt）..."
-if ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone; then
+if [ "$USE_PORT" = "88" ]; then
+    # 使用88端口申请
+    CERT_SUCCESS=$(~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --httpport 88 && echo "yes" || echo "no")
+else
+    # 使用80端口申请
+    CERT_SUCCESS=$(~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone && echo "yes" || echo "no")
+fi
+
+if [ "$CERT_SUCCESS" = "yes" ]; then
     print_success "证书申请成功！"
     
     # 创建证书目录
@@ -223,6 +252,10 @@ EOF
     systemctl start nginx
     systemctl reload nginx 2>/dev/null || true
     print_success "Nginx启动成功"
+    
+    # 重新启动之前停止的服务
+    systemctl start trojan 2>/dev/null || true
+    systemctl start trojan-web 2>/dev/null || true
     
     # 配置防火墙
     print_info "配置防火墙..."
@@ -303,6 +336,11 @@ EOF
     
     nginx -t && systemctl start nginx
     print_info "已配置HTTP模式: http://$DOMAIN"
+    
+    # 重新启动之前停止的服务
+    systemctl start trojan 2>/dev/null || true
+    systemctl start trojan-web 2>/dev/null || true
+    
     echo ""
     print_warning "修复问题后，重新运行此脚本配置SSL"
 fi
